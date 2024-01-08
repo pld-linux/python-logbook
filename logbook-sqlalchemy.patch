@@ -1,0 +1,241 @@
+From 301c50838f181f6e11563e980fa60df2e644c263 Mon Sep 17 00:00:00 2001
+From: Frazer McLean <frazer@frazermclean.co.uk>
+Date: Mon, 26 Jun 2023 00:14:12 +0200
+Subject: [PATCH 1/3] Support SQLAlchemy 1.4/2.0
+
+---
+ logbook/ticketing.py | 102 +++++++++++++++++++++++--------------------
+ 1 file changed, 55 insertions(+), 47 deletions(-)
+
+diff --git a/logbook/ticketing.py b/logbook/ticketing.py
+index ed63c3b..3757434 100644
+--- Logbook-1.5.3/logbook/ticketing.py.orig	2019-10-16 19:59:35.000000000 +0200
++++ Logbook-1.5.3/logbook/ticketing.py	2024-01-03 20:59:48.552097994 +0100
+@@ -23,7 +23,7 @@ class Ticket(object):
+ 
+     def __init__(self, db, row):
+         self.db = db
+-        self.__dict__.update(row)
++        self.__dict__.update(row._mapping)
+ 
+     @cached_property
+     def last_occurrence(self):
+@@ -64,11 +64,11 @@ class Occurrence(LogRecord):
+     """Represents an occurrence of a ticket."""
+ 
+     def __init__(self, db, row):
+-        self.update_from_dict(json.loads(row['data']))
++        self.update_from_dict(json.loads(row.data))
+         self.db = db
+-        self.time = row['time']
+-        self.ticket_id = row['ticket_id']
+-        self.occurrence_id = row['occurrence_id']
++        self.time = row.time
++        self.ticket_id = row.ticket_id
++        self.occurrence_id = row.occurrence_id
+ 
+ 
+ class BackendBase(object):
+@@ -144,7 +144,7 @@ class SQLAlchemyBackend(BackendBase):
+             # Pool recycle keeps connections from going stale,
+             # which happens in MySQL Databases
+             # Pool size is more custom for out stack
+-            self.engine = create_engine(engine_or_uri, convert_unicode=True,
++            self.engine = create_engine(engine_or_uri,
+                                         pool_recycle=360, pool_size=1000)
+ 
+             # Create session factory using session maker
+@@ -207,8 +207,8 @@ class SQLAlchemyBackend(BackendBase):
+         # Can use the session instead engine.connection and transaction
+         s = self.session
+         try:
+-            q = self.tickets.select(self.tickets.c.record_hash == hash)
+-            row = s.execute(q).fetchone()
++            q = self.tickets.select().where(self.tickets.c.record_hash == hash)
++            row = s.execute(q).one_or_none()
+             if row is None:
+                 row = s.execute(self.tickets.insert().values(
+                     record_hash=hash,
+@@ -222,7 +222,7 @@ class SQLAlchemyBackend(BackendBase):
+                 ))
+                 ticket_id = row.inserted_primary_key[0]
+             else:
+-                ticket_id = row['ticket_id']
++                ticket_id = row.ticket_id
+             s.execute(self.occurrences.insert()
+                       .values(ticket_id=ticket_id,
+                               time=record.time,
+@@ -243,43 +243,51 @@ class SQLAlchemyBackend(BackendBase):
+ 
+     def count_tickets(self):
+         """Returns the number of tickets."""
+-        return self.engine.execute(self.tickets.count()).fetchone()[0]
++        from sqlalchemy import func, select
++
++        with self.engine.begin() as conn:
++            return conn.scalar(select(func.count()).select_from(self.tickets))
+ 
+     def get_tickets(self, order_by='-last_occurrence_time', limit=50,
+                     offset=0):
+         """Selects tickets from the database."""
+-        return [Ticket(self, row) for row in self.engine.execute(
++        with self.engine.begin() as conn:
++          return [Ticket(self, row) for row in conn.execute(
+             self._order(self.tickets.select(), self.tickets, order_by)
+-            .limit(limit).offset(offset)).fetchall()]
++            .limit(limit).offset(offset))]
+ 
+     def solve_ticket(self, ticket_id):
+         """Marks a ticket as solved."""
+-        self.engine.execute(self.tickets.update()
++        with self.engine.begin() as conn:
++            conn.execute(self.tickets.update()
+                             .where(self.tickets.c.ticket_id == ticket_id)
+                             .values(solved=True))
+ 
+     def delete_ticket(self, ticket_id):
+         """Deletes a ticket from the database."""
+-        self.engine.execute(self.occurrences.delete()
++        with self.engine.begin() as conn:
++            conn.execute(self.occurrences.delete()
+                             .where(self.occurrences.c.ticket_id == ticket_id))
+-        self.engine.execute(self.tickets.delete()
++            conn.execute(self.tickets.delete()
+                             .where(self.tickets.c.ticket_id == ticket_id))
+ 
+     def get_ticket(self, ticket_id):
+         """Return a single ticket with all occurrences."""
+-        row = self.engine.execute(self.tickets.select().where(
+-            self.tickets.c.ticket_id == ticket_id)).fetchone()
++        with self.engine.begin() as conn:
++            row = conn.execute(self.tickets.select().where(
++                self.tickets.c.ticket_id == ticket_id)).one_or_none()
+         if row is not None:
+             return Ticket(self, row)
+ 
+     def get_occurrences(self, ticket, order_by='-time', limit=50, offset=0):
+         """Selects occurrences from the database for a ticket."""
+-        return [Occurrence(self, row) for row in
+-                self.engine.execute(self._order(
++        with self.engine.begin() as conn:
++            return [Occurrence(self, row) for row in
++                conn.execute(self._order(
+                     self.occurrences.select()
+                     .where(self.occurrences.c.ticket_id == ticket),
+                     self.occurrences, order_by)
+-                .limit(limit).offset(offset)).fetchall()]
++                .limit(limit).offset(offset))]
+ 
+ 
+ class MongoDBBackend(BackendBase):
+
+From f30a4aca8f882545457a230fabc07e9a1bb70cdf Mon Sep 17 00:00:00 2001
+From: Frazer McLean <frazer@frazermclean.co.uk>
+Date: Mon, 26 Jun 2023 00:38:07 +0200
+Subject: [PATCH 2/3] Rerun racy logged_if_slow tests
+
+---
+ .github/workflows/main.yml | 6 +++---
+ pyproject.toml             | 2 +-
+ tests/test_utils.py        | 5 +++++
+ 3 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 869f2be..a8a6773 100644
+--- Logbook-1.5.3/setup.py.orig	2019-10-16 19:59:35.000000000 +0200
++++ Logbook-1.5.3/setup.py	2024-01-08 20:20:45.711112093 +0100
+@@ -158,9 +158,9 @@ with open(version_file_path) as version_
+ 
+ extras_require = dict()
+ if sys.version_info[:2] < (3, 0):
+-    extras_require['test'] = set(['pytest', 'pytest-cov<2.6'])
++    extras_require['test'] = set(['pytest', 'pytest-rerunfailures', 'pytest-cov<2.6'])
+ else:
+-    extras_require['test'] = set(['pytest>4.0', 'pytest-cov>=2.6'])
++    extras_require['test'] = set(['pytest>4.0', 'pytest-rerunfailures', 'pytest-cov>=2.6'])
+ 
+ if sys.version_info[:2] < (3, 3):
+     extras_require['test'] |= set(['mock'])
+diff --git a/tests/test_utils.py b/tests/test_utils.py
+index b1f21d6..53fe519 100644
+--- Logbook-1.5.3/tests/test_utils.py.orig	2019-10-16 19:59:35.000000000 +0200
++++ Logbook-1.5.3/tests/test_utils.py	2024-01-08 19:44:42.622830548 +0100
+@@ -14,6 +14,7 @@ except ImportError:
+     from mock import Mock, call
+ 
+ 
++@pytest.mark.flaky(reruns=5)
+ def test_logged_if_slow_reached(test_handler):
+     with test_handler.applicationbound():
+         with logged_if_slow('checking...', threshold=_THRESHOLD):
+@@ -23,6 +24,7 @@ def test_logged_if_slow_reached(test_han
+         assert record.message == 'checking...'
+ 
+ 
++@pytest.mark.flaky(reruns=5)
+ def test_logged_if_slow_did_not_reached(test_handler):
+     with test_handler.applicationbound():
+         with logged_if_slow('checking...', threshold=_THRESHOLD):
+@@ -30,6 +32,7 @@ def test_logged_if_slow_did_not_reached(
+         assert len(test_handler.records) == 0
+ 
+ 
++@pytest.mark.flaky(reruns=5)
+ def test_logged_if_slow_logger():
+     logger = Mock()
+ 
+@@ -39,6 +42,7 @@ def test_logged_if_slow_logger():
+     assert logger.log.call_args == call(logbook.DEBUG, 'checking...')
+ 
+ 
++@pytest.mark.flaky(reruns=5)
+ def test_logged_if_slow_level(test_handler):
+     with test_handler.applicationbound():
+         with logged_if_slow('checking...', threshold=_THRESHOLD,
+@@ -48,6 +52,7 @@ def test_logged_if_slow_level(test_handl
+     assert test_handler.records[0].level == logbook.WARNING
+ 
+ 
++@pytest.mark.flaky(reruns=5)
+ def test_logged_if_slow_deprecated(logger, test_handler):
+     with test_handler.applicationbound():
+         with logged_if_slow('checking...', threshold=_THRESHOLD,
+
+From dd5b2591d0f35de922850f5a9ca7fcf43fce682d Mon Sep 17 00:00:00 2001
+From: Frazer McLean <frazer@frazermclean.co.uk>
+Date: Mon, 26 Jun 2023 01:03:40 +0200
+Subject: [PATCH 3/3] Remove unused test file
+
+---
+ tests/test_ci.py | 23 -----------------------
+ 1 file changed, 23 deletions(-)
+ delete mode 100644 tests/test_ci.py
+
+diff --git a/tests/test_ci.py b/tests/test_ci.py
+deleted file mode 100644
+index 087685d..0000000
+--- a/tests/test_ci.py
++++ /dev/null
+@@ -1,22 +0,0 @@
+-# -*- coding: utf-8 -*-
+-import os
+-
+-import pytest
+-
+-from .utils import appveyor, travis
+-
+-@appveyor
+-def test_appveyor_speedups():
+-    if os.environ.get('CYBUILD'):
+-        import logbook._speedups
+-    else:
+-        with pytest.raises(ImportError):
+-            import logbook._speedups
+-
+-@travis
+-def test_travis_speedups():
+-    if os.environ.get('CYBUILD'):
+-        import logbook._speedups
+-    else:
+-        with pytest.raises(ImportError):
+-            import logbook._speedups

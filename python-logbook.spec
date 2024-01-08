@@ -13,6 +13,8 @@ Group:		Development/Languages/Python
 #Source0Download: https://pypi.org/simple/logbook/
 Source0:	https://files.pythonhosted.org/packages/source/l/logbook/Logbook-%{version}.tar.gz
 # Source0-md5:	719970ea22dd274797bb4328161d700f
+# https://github.com/getlogbook/logbook/pull/331.patch (adjusted for 1.5.3)
+Patch0:		logbook-sqlalchemy.patch
 URL:		https://pypi.org/project/Logbook/
 BuildRequires:	python >= 1:2.7
 BuildRequires:	python-Cython
@@ -22,6 +24,8 @@ BuildRequires:	python-setuptools
 %if %{with tests}
 BuildRequires:	python-mock
 BuildRequires:	python-pytest
+BuildRequires:	python-pytest-rerunfailures
+BuildRequires:	python-sqlalchemy
 %endif
 BuildRequires:	rpm-build >= 4.6
 BuildRequires:	rpm-pythonprov
@@ -37,6 +41,7 @@ Logbook to przyjemny zamiennik biblioteki logging.
 
 %prep
 %setup -q -n Logbook-%{version}
+%patch0 -p1
 
 %build
 cd logbook
@@ -46,6 +51,7 @@ cd ..
 
 %if %{with tests}
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTEST_PLUGINS=pytest_rerunfailures \
 PYTHONPATH=$(echo $(pwd)/build-2/lib.linux-*) \
 %{__python} -m pytest tests
 %endif
