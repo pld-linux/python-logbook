@@ -41,7 +41,7 @@ Logbook to przyjemny zamiennik biblioteki logging.
 
 %prep
 %setup -q -n Logbook-%{version}
-%patch0 -p1
+%patch -P0 -p1
 
 %build
 cd logbook
